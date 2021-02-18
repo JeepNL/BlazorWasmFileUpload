@@ -1,0 +1,73 @@
+﻿@page "/fileupload"
+@using System.IO
+@using Microsoft.AspNetCore.Components.Forms;
+@using System.Net.Http;
+@using System.Threading.Tasks;
+@using System.Diagnostics;
+@inject HttpClient Http
+
+<h1>File Upload</h1>
+<br />
+
+<InputFile disabled="@isUploading" OnChange="LoadFile" />
+<br />
+<br />
+
+@if (isUploading)
+{
+    <p>Uploading @fileName (<b>@fileSizeInMB.ToString("F2")</b> MB), please wait ...</p>
+}
+
+@if (!String.IsNullOrEmpty(duration))
+{
+    <p>Upload of @fileName (<b>@fileSizeInMB.ToString("F2")</b> MB) finished in <b>@duration</b> (mm:ss.ms) </p>
+
+    <p>Throughput: <b>@MBPerSeconds.ToString("F2")</b> MB/s </p>
+}
+
+@code {
+    bool isUploading = false;
+    string fileServerUri;
+    string duration;
+    string fileName;
+    double fileSizeInMB;
+    double MBPerSeconds;
+
+    async Task LoadFile(InputFileChangeEventArgs e)
+    {
+        isUploading = true;
+        duration = string.Empty;
+        fileSizeInMB = e.File.Size / (1024F * 1024F);
+        fileName = e.File.Name;
+
+        Stopwatch sw = new();
+        sw.Start();
+
+        using Stream fileStream = e.File.OpenReadStream(e.File.Size);
+        using MemoryStream ms = new();
+        await fileStream.CopyToAsync(ms);
+        byte[] fileBytes = ms.ToArray();
+
+        // On server 'file' binds to IFormFile
+        // Post to server
+        using var content = new MultipartFormDataContent();
+        content.Add(
+            content: new ByteArrayContent(fileBytes),
+            name: "file", // name must match the endpoint's parameter name
+            fileName: fileName
+            );
+
+        var response = await Http.PostAsync("/api/FileUpload", content);
+
+        // Was the post a success?
+        response.EnsureSuccessStatusCode();
+
+        sw.Stop();
+        TimeSpan ts = sw.Elapsed;
+
+        isUploading = false;
+        duration = String.Format("{0:00}:{1:00}.{2:00}", ts.Minutes, ts.Seconds, ts.Milliseconds / 10);
+        double totalSeconds = ts.TotalSeconds;
+        MBPerSeconds = fileSizeInMB / totalSeconds;
+    }
+}

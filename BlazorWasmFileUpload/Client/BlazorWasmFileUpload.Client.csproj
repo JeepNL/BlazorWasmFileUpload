@@ -13,4 +13,8 @@
     <ProjectReference Include="..\Shared\BlazorWasmFileUpload.Shared.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Folder Include="wwwroot\uploads\" />
+  </ItemGroup>
+
 </Project>
