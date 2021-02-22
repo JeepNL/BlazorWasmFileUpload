@@ -4,70 +4,250 @@
 @using System.Net.Http;
 @using System.Threading.Tasks;
 @using System.Diagnostics;
-@inject HttpClient Http
+@using System.Threading
+@inject HttpClient client
 
-<h1>File Upload</h1>
+<h1>File Upload Test</h1>
 <br />
 
-<InputFile disabled="@isUploading" OnChange="LoadFile" />
-<br />
-<br />
+<p>
+    <EditForm Model=@upload>
+        Upload a local file or a in memory random generated binary file:
+        <InputSelect ValueExpression="(() => fileSelection)" Value="@fileSelection" ValueChanged="@((int value) => FileSelection(value))">
+            <option value="0">Select ...</option>
+            <option value="1">Local file</option>
+            <option value="2">Generated file</option>
+        </InputSelect>
+    </EditForm>
+</p>
+
+@if (fileSelection == 1)
+{
+    <p>Choose local file to upload in chunks of 512 KB</p>
+
+    <p><InputFile OnChange="LoadLocalFile" /></p>
+
+    <p>Upload starts after selection</p>
+}
+else if (fileSelection == 2)
+{
+    <EditForm Model="@upload" OnValidSubmit="UploadFile">
+        <p>
+            Select size of random binary file to create in memory for upload:
+            <InputSelect ValueExpression="(() => upload.FileSizeInBytes)" Value="@(upload.FileSizeInBytes / (1024 * 1024))" ValueChanged="@((int value) => CreateRandomFile(value))">
+                <option selected value="0">Select file size</option>
+                <option value="1">1 MB</option>
+                <option value="5">5 MB</option>
+                <option value="10">10 MB</option>
+                <option value="20">20 MB</option>
+            </InputSelect>
+        </p>
+
+        @if (isCreatingfile && (upload.FileSizeInBytes != 0))
+        {
+            <p>Creating binary @upload.FileSizeInMB.ToString("F2") MB file in memory, please wait .. (<i>this can take a while</i>)</p>
+        }
+
+        @if (fileSizeSelected)
+        {
+            <p>
+                Now select the chunk size:
+
+                <InputSelect ValueExpression="(() => upload.ChunkSizeInKB)" Value="upload.ChunkSizeInKB" ValueChanged="@((int value) => ChunkSizeSelected(value))">
+                    <option seleced value="0">Select chunk size</option>
+                    <option value="64">64 KB</option>
+                    <option value="128">128 KB</option>
+                    <option value="256">256 KB</option>
+                    <option value="512">512 KB</option>
+                    <option value="1024">1 MB</option>
+                    <option value="5120">5 MB</option>
+                    <option value="10240">10 MB</option>
+                    <option value="20480">20 MB</option>
+                </InputSelect>
+            </p>
+
+            <p>If you choose a chunk size equal or greater than the file size the file will be uploaded in one go (<i>without chunking = slowest</i>)</p>
+
+            <p><button disabled="@(!chunkSizeSelected)" type="submit">Upload</button></p>
+        }
+    </EditForm>
+}
 
 @if (isUploading)
 {
-    <p>Uploading @fileName (<b>@fileSizeInMB.ToString("F2")</b> MB), please wait ...</p>
+    <p>Uploading @upload.UniqueFileName (<b>@upload.FileSizeInMB.ToString("F2")</b> MB), please wait ...</p>
+
+    var progress = (100.0 * totalBytesRead / upload.FileSizeInBytes).ToString("0");
+
+    <p>Progress (Chunk Size = @upload.ChunkSizeInKB KB)</p>
+
+    <div class="progress">
+        <div class="progress-bar" role="progressbar" style="@($"width: {progress}%")" aria-valuenow="@progress" aria-valuemin="0" aria-valuemax="100"></div>
+    </div>
 }
 
-@if (!String.IsNullOrEmpty(duration))
+@if (!String.IsNullOrEmpty(result))
 {
-    <p>Upload of @fileName (<b>@fileSizeInMB.ToString("F2")</b> MB) finished in <b>@duration</b> (mm:ss.ms) </p>
-
-    <p>Throughput: <b>@MBPerSeconds.ToString("F2")</b> MB/s </p>
+    @((MarkupString)result);
 }
 
 @code {
-    bool isUploading = false;
-    string fileServerUri;
-    string duration;
-    string fileName;
-    double fileSizeInMB;
-    double MBPerSeconds;
+    CancellationTokenSource cancellation = new();
+    Upload upload = new();
+    MemoryStream memoryStream;
 
-    async Task LoadFile(InputFileChangeEventArgs e)
+    int fileSelection = 0;
+    bool fileSizeSelected = false;
+    bool chunkSizeSelected = false;
+    bool isCreatingfile = false;
+    bool isUploading = false;
+    int totalBytesRead = 0;
+    string result = string.Empty;
+
+    Task FileSelection(int value)
     {
+        ResetForm();
+        result = string.Empty;
+        fileSelection = value;
+        return Task.CompletedTask;
+    }
+
+    async Task LoadLocalFile(InputFileChangeEventArgs e)
+    {
+        upload.ChunkSizeInKB = 512; // default
+        upload.FileSizeInBytes = (int)e.File.Size;
+        upload.FileName = e.File.Name;
+
+        await using Stream stream = e.File.OpenReadStream(upload.FileSizeInBytes);
+        memoryStream = new MemoryStream((int)upload.FileSizeInBytes);
+        await stream.CopyToAsync(memoryStream);
+        memoryStream.Position = 0;
+
+        await UploadFile();
+    }
+
+    async Task CreateRandomFile(int value)
+    {
+        upload.FileSizeInBytes = value * 1024 * 1024;
+
+        if (upload.FileSizeInBytes == 0)
+            return;
+
+        isCreatingfile = true;
+
+        StateHasChanged();
+        await Task.Delay(10);
+
+        Random rnd = new();
+        Byte[] randomFile = new Byte[upload.FileSizeInBytes];
+        rnd.NextBytes(randomFile);
+        memoryStream = new MemoryStream(randomFile);
+        fileSizeSelected = true;
+        return;
+    }
+
+    Task ChunkSizeSelected(int value)
+    {
+        upload.ChunkSizeInKB = value;
+
+        if (upload.ChunkSizeInKB == 0)
+        {
+            chunkSizeSelected = false;
+            return Task.CompletedTask;
+        }
+
+        chunkSizeSelected = true;
+        return Task.CompletedTask;
+    }
+
+    async Task UploadFile()
+    {
+        if (upload.ChunkSizeInKB == 0)
+            return;
+
         isUploading = true;
-        duration = string.Empty;
-        fileSizeInMB = e.File.Size / (1024F * 1024F);
-        fileName = e.File.Name;
+        totalBytesRead = 0;
+        int bufferSize = 1024 * upload.ChunkSizeInKB; // bytes
+        byte[] buffer = new byte[bufferSize];
+        int bytesRead = 0;
+        int counter = 0;
+
+        if (string.IsNullOrEmpty(upload.FileName))
+            upload.UniqueFileName = Path.GetRandomFileName() + ".bin";
+        else
+            upload.UniqueFileName = Path.GetRandomFileName() + upload.FileName;
 
         Stopwatch sw = new();
         sw.Start();
+        while ((bytesRead = await memoryStream.ReadAsync(buffer, cancellation.Token)) != 0)
+        {
+            counter++;
+            totalBytesRead += bytesRead;
 
-        using Stream fileStream = e.File.OpenReadStream(e.File.Size);
-        using MemoryStream ms = new();
-        await fileStream.CopyToAsync(ms);
-        byte[] fileBytes = ms.ToArray();
+            using MemoryStream tmpMemoryStream = new MemoryStream(buffer, 0, bytesRead);
+            using MultipartFormDataContent content = new();
+            content.Add(
+                content: new StreamContent(tmpMemoryStream, Convert.ToInt32(tmpMemoryStream.Length)),
+                name: "\"uploadFile\"",
+                fileName: upload.UniqueFileName
+                );
+            var response = await client.PostAsync("/api/Upload", content);
+            response.EnsureSuccessStatusCode();
 
-        // On server 'file' binds to IFormFile
-        // Post to server
-        using var content = new MultipartFormDataContent();
-        content.Add(
-            content: new ByteArrayContent(fileBytes),
-            name: "file", // name must match the endpoint's parameter name
-            fileName: fileName
-            );
-
-        var response = await Http.PostAsync("/api/FileUpload", content);
-
-        // Was the post a success?
-        response.EnsureSuccessStatusCode();
-
+            var fileLocation = response.Headers.Location.ToString();
+            StateHasChanged();
+        };
         sw.Stop();
         TimeSpan ts = sw.Elapsed;
 
+        upload.Duration = String.Format("{0:00}:{1:00}.{2:00}", ts.Minutes, ts.Seconds, ts.Milliseconds / 10);
+        upload.MegaBytesPerSeconds = upload.CalculateMegabytesPerSeconds(ts.TotalSeconds);
+
+        result = "<h4>Result:</h4>";
+        result += $"<p><b>{upload.FileSizeInMB.ToString("F2")}</b> MB upload in {((counter == 1) ? "a chunk" : "chunks")} of <b>{upload.ChunkSizeInKB}</b> KB completed in <b>{upload.Duration}</b> (mm:ss.ms)</p>";
+        result += $"<p>Throughput: <b>{upload.MegaBytesPerSeconds.ToString("F2")}</b> MB/s</p>";
+
+        ResetForm();
+    }
+
+    public void ResetForm()
+    {
+        chunkSizeSelected = false;
+        fileSelection = 0;
+        fileSizeSelected = false;
+        isCreatingfile = false;
         isUploading = false;
-        duration = String.Format("{0:00}:{1:00}.{2:00}", ts.Minutes, ts.Seconds, ts.Milliseconds / 10);
-        double totalSeconds = ts.TotalSeconds;
-        MBPerSeconds = fileSizeInMB / totalSeconds;
+        upload.ChunkSizeInKB = 0;
+        upload.Duration = string.Empty;
+        upload.FileSizeInBytes = 0;
+    }
+
+    public void Dispose()
+    {
+        cancellation.Cancel();
+    }
+
+    public class Upload
+    {
+        public string FileName { get; set; } = string.Empty;
+        public string UniqueFileName { get; set; } = string.Empty;
+        public int FileSizeInBytes { get; set; } = 0;
+        public int ChunkSizeInKB { get; set; } = 0;
+        public double MegaBytesPerSeconds { get; set; } = 0;
+        public string Duration { get; set; } = string.Empty;
+
+        public double FileSizeInMB
+        {
+            get
+            {
+                return FileSizeInBytes / (1024F * 1024F);
+            }
+        }
+
+        public double CalculateMegabytesPerSeconds(double seconds)
+        {
+            double MBs = FileSizeInMB;
+            return MBs / seconds;
+        }
     }
 }

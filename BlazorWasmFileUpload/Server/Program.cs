@@ -20,7 +20,12 @@ namespace BlazorWasmFileUpload.Server
 			Host.CreateDefaultBuilder(args)
 				.ConfigureWebHostDefaults(webBuilder =>
 				{
-					webBuilder.UseStartup<Startup>();
+					webBuilder.ConfigureKestrel((serverHost, serverOptions) =>
+					{
+						serverOptions.Limits.MaxRequestBodySize = int.MaxValue;
+					})
+					.UseContentRoot(System.IO.Directory.GetCurrentDirectory())
+					.UseStartup<Startup>();
 				});
 	}
 }
