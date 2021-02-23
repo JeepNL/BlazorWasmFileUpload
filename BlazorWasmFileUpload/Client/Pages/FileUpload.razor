@@ -68,7 +68,10 @@ else if (fileSelection == 2)
 
             <p>If you choose a chunk size equal or greater than the file size the file will be uploaded in one go (<i>without chunking = slowest</i>)</p>
 
-            <p><button disabled="@(!chunkSizeSelected)" type="submit">Upload</button></p>
+            <p>
+                <button disabled="@(!chunkSizeSelected)" type="submit">Upload</button>&nbsp;
+                <button disabled="@(!canCancel)" @onclick="CancelUpload">Cancel</button>
+            </p>
         }
     </EditForm>
 }
@@ -86,21 +89,23 @@ else if (fileSelection == 2)
     </div>
 }
 
-@if (!String.IsNullOrEmpty(result))
+@if (!String.IsNullOrEmpty(result) && !hasBeenCancelled)
 {
     @((MarkupString)result);
 }
 
 @code {
-    CancellationTokenSource cancellation = new();
-    Upload upload = new();
+    CancellationTokenSource cancellation;
     MemoryStream memoryStream;
+    Upload upload = new();
 
     int fileSelection = 0;
     bool fileSizeSelected = false;
     bool chunkSizeSelected = false;
     bool isCreatingfile = false;
     bool isUploading = false;
+    bool canCancel = false;
+    bool hasBeenCancelled = false;
     int totalBytesRead = 0;
     string result = string.Empty;
 
@@ -128,19 +133,26 @@ else if (fileSelection == 2)
 
     async Task CreateRandomFile(int value)
     {
+        if (isCreatingfile)
+        {
+            isCreatingfile = false;
+            fileSizeSelected = false;
+            upload.FileSizeInBytes = value;
+        }
+
         upload.FileSizeInBytes = value * 1024 * 1024;
 
         if (upload.FileSizeInBytes == 0)
             return;
 
         isCreatingfile = true;
-
-        StateHasChanged();
-        await Task.Delay(10);
+        await InvokeAsync(StateHasChanged);
+        await Task.Delay(1);
 
         Random rnd = new();
         Byte[] randomFile = new Byte[upload.FileSizeInBytes];
         rnd.NextBytes(randomFile);
+        memoryStream?.Dispose();
         memoryStream = new MemoryStream(randomFile);
         fileSizeSelected = true;
         return;
@@ -162,8 +174,14 @@ else if (fileSelection == 2)
 
     async Task UploadFile()
     {
-        if (upload.ChunkSizeInKB == 0)
+        if (upload.ChunkSizeInKB == 0 || hasBeenCancelled)
             return;
+
+        cancellation?.Dispose();
+        cancellation = new CancellationTokenSource();
+        canCancel = true;
+        chunkSizeSelected = false; // Disable upload button
+        hasBeenCancelled = false;
 
         isUploading = true;
         totalBytesRead = 0;
@@ -179,33 +197,48 @@ else if (fileSelection == 2)
 
         Stopwatch sw = new();
         sw.Start();
-        while ((bytesRead = await memoryStream.ReadAsync(buffer, cancellation.Token)) != 0)
+        try
         {
-            counter++;
-            totalBytesRead += bytesRead;
+            while ((bytesRead = await memoryStream.ReadAsync(buffer, cancellation.Token)) != 0)
+            {
+                counter++;
+                totalBytesRead += bytesRead;
+                using MemoryStream tmpMemoryStream = new MemoryStream(buffer, 0, bytesRead);
+                using MultipartFormDataContent content = new();
+                content.Add(
+                    content: new StreamContent(tmpMemoryStream, Convert.ToInt32(tmpMemoryStream.Length)),
+                    name: "\"uploadFile\"",
+                    fileName: upload.UniqueFileName
+                    );
+                var response = await client.PostAsync("/api/Upload", content);
+                response.EnsureSuccessStatusCode();
 
-            using MemoryStream tmpMemoryStream = new MemoryStream(buffer, 0, bytesRead);
-            using MultipartFormDataContent content = new();
-            content.Add(
-                content: new StreamContent(tmpMemoryStream, Convert.ToInt32(tmpMemoryStream.Length)),
-                name: "\"uploadFile\"",
-                fileName: upload.UniqueFileName
-                );
-            var response = await client.PostAsync("/api/Upload", content);
-            response.EnsureSuccessStatusCode();
-
-            var fileLocation = response.Headers.Location.ToString();
-            StateHasChanged();
-        };
+                var fileLocation = response.Headers.Location.ToString();
+                StateHasChanged();
+            };
+        }
+        catch (OperationCanceledException)
+        {
+            hasBeenCancelled = true;
+            await InvokeAsync(StateHasChanged);
+            await Task.Delay(1);
+        }
+        finally
+        {
+            canCancel = false;
+        }
         sw.Stop();
         TimeSpan ts = sw.Elapsed;
 
-        upload.Duration = String.Format("{0:00}:{1:00}.{2:00}", ts.Minutes, ts.Seconds, ts.Milliseconds / 10);
-        upload.MegaBytesPerSeconds = upload.CalculateMegabytesPerSeconds(ts.TotalSeconds);
+        if (!hasBeenCancelled)
+        {
+            upload.Duration = String.Format("{0:00}:{1:00}.{2:00}", ts.Minutes, ts.Seconds, ts.Milliseconds / 10);
+            upload.MegaBytesPerSeconds = upload.CalculateMegabytesPerSeconds(ts.TotalSeconds);
 
-        result = "<h4>Result:</h4>";
-        result += $"<p><b>{upload.FileSizeInMB.ToString("F2")}</b> MB upload in {((counter == 1) ? "a chunk" : "chunks")} of <b>{upload.ChunkSizeInKB}</b> KB completed in <b>{upload.Duration}</b> (mm:ss.ms)</p>";
-        result += $"<p>Throughput: <b>{upload.MegaBytesPerSeconds.ToString("F2")}</b> MB/s</p>";
+            result = "<h4>Result:</h4>";
+            result += $"<p><b>{upload.FileSizeInMB.ToString("F2")}</b> MB upload in {((counter == 1) ? "a chunk" : "chunks")} of <b>{upload.ChunkSizeInKB}</b> KB completed in <b>{upload.Duration}</b> (mm:ss.ms)</p>";
+            result += $"<p>Throughput: <b>{upload.MegaBytesPerSeconds.ToString("F2")}</b> MB/s</p>";
+        }
 
         ResetForm();
     }
@@ -222,9 +255,13 @@ else if (fileSelection == 2)
         upload.FileSizeInBytes = 0;
     }
 
-    public void Dispose()
+    public async Task CancelUpload()
     {
+        hasBeenCancelled = true;
+        await InvokeAsync(StateHasChanged);
+        await Task.Delay(1);
         cancellation.Cancel();
+        // TODO: Delete uploaded file
     }
 
     public class Upload
