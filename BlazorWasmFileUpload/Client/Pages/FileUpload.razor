@@ -193,7 +193,7 @@ else if (fileSelection == 2)
         if (string.IsNullOrEmpty(upload.FileName))
             upload.UniqueFileName = Path.GetRandomFileName() + ".bin";
         else
-            upload.UniqueFileName = Path.GetRandomFileName() + upload.FileName;
+            upload.UniqueFileName = Path.GetRandomFileName() + "-" + upload.FileName;
 
         Stopwatch sw = new();
         sw.Start();
